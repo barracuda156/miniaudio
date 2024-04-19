@@ -32195,6 +32195,12 @@ static ma_result ma_get_channel_map_from_AudioChannelLayout(AudioChannelLayout* 
 #define AUDIO_OBJECT_PROPERTY_ELEMENT kAudioObjectPropertyElementMaster
 #endif
 
+/* kAudioDevicePropertyScope* were renamed to kAudioObjectPropertyScope* in 10.8. */
+#ifndef MAC_OS_X_VERSION_10_8
+#define kAudioObjectPropertyScopeInput kAudioDevicePropertyScopeInput
+#define kAudioObjectPropertyScopeOutput kAudioDevicePropertyScopeOutput
+#endif
+
 static ma_result ma_get_device_object_ids__coreaudio(ma_context* pContext, UInt32* pDeviceCount, AudioObjectID** ppDeviceObjectIDs) /* NOTE: Free the returned buffer with ma_free(). */
 {
     AudioObjectPropertyAddress propAddressDevices;
