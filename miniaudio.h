@@ -17927,7 +17927,7 @@ DEVICE I/O
 
 #ifndef MA_NO_DEVICE_IO
 
-#if defined(MA_APPLE) && (__MAC_OS_X_VERSION_MIN_REQUIRED < 101200)
+#if defined(MA_APPLE) && (MAC_OS_X_VERSION_MIN_REQUIRED < 101200)
     #include <mach/mach_time.h> /* For mach_absolute_time() */
 #endif
 
@@ -18489,7 +18489,7 @@ Timing
 
         return (double)(counter.QuadPart - pTimer->counter) / g_ma_TimerFrequency.QuadPart;
     }
-#elif defined(MA_APPLE) && (__MAC_OS_X_VERSION_MIN_REQUIRED < 101200)
+#elif defined(MA_APPLE) && (MAC_OS_X_VERSION_MIN_REQUIRED < 101200)
     static ma_uint64 g_ma_TimerFrequency = 0;
     static void ma_timer_init(ma_timer* pTimer)
     {
