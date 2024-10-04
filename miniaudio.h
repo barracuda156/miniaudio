@@ -7561,6 +7561,11 @@ struct ma_context
             ma_bool32 tryStartServer;
         } jack;
 #endif
+
+#ifdef MA_APPLE
+    #include <AvailabilityMacros.h>
+#endif
+
 #ifdef MA_SUPPORT_COREAUDIO
         struct
         {
@@ -7576,9 +7581,16 @@ struct ma_context
             ma_proc AudioObjectRemovePropertyListener;
 
             ma_handle hAudioUnit;  /* Could possibly be set to AudioToolbox on later versions of macOS. */
+#if defined(MA_APPLE) && (MAC_OS_X_VERSION_MIN_REQUIRED < 1060)
+    /* Legacy API, used on macOS < 10.6. */
+            ma_proc FindNextComponent;
+            ma_proc CloseComponent;
+            ma_proc OpenAComponent;
+#else
             ma_proc AudioComponentFindNext;
             ma_proc AudioComponentInstanceDispose;
             ma_proc AudioComponentInstanceNew;
+#endif
             ma_proc AudioOutputUnitStart;
             ma_proc AudioOutputUnitStop;
             ma_proc AudioUnitAddPropertyListener;
@@ -17989,10 +18001,6 @@ DEVICE I/O
     #if defined(MA_EMSCRIPTEN) || defined(MA_ORBIS) || defined(MA_PROSPERO)
         #define MA_NO_RUNTIME_LINKING
     #endif
-#endif
-
-#ifdef MA_APPLE
-    #include <AvailabilityMacros.h>
 #endif
 
 #ifndef MA_NO_DEVICE_IO
@@ -32013,9 +32021,15 @@ typedef OSStatus (* ma_AudioObjectRemovePropertyListener_proc)(AudioObjectID inO
 #endif
 
 /* AudioToolbox */
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+typedef Component (* ma_AudioComponentFindNext_proc)(Component inComponent, const ComponentDescription* inDesc);
+typedef OSStatus (* ma_AudioComponentInstanceDispose_proc)(ComponentInstance inInstance);
+typedef OSStatus (* ma_AudioComponentInstanceNew_proc)(Component inComponent, ComponentInstance* outInstance);
+#else
 typedef AudioComponent (* ma_AudioComponentFindNext_proc)(AudioComponent inComponent, const AudioComponentDescription* inDesc);
 typedef OSStatus (* ma_AudioComponentInstanceDispose_proc)(AudioComponentInstance inInstance);
 typedef OSStatus (* ma_AudioComponentInstanceNew_proc)(AudioComponent inComponent, AudioComponentInstance* outInstance);
+#endif
 typedef OSStatus (* ma_AudioOutputUnitStart_proc)(AudioUnit inUnit);
 typedef OSStatus (* ma_AudioOutputUnitStop_proc)(AudioUnit inUnit);
 typedef OSStatus (* ma_AudioUnitAddPropertyListener_proc)(AudioUnit inUnit, AudioUnitPropertyID inID, AudioUnitPropertyListenerProc inProc, void* inProcUserData);
@@ -33803,7 +33817,7 @@ static void on_start_stop__coreaudio(void* pUserData, AudioUnit audioUnit, Audio
 
     /*
     There's been a report of a deadlock here when triggered by ma_device_uninit(). It looks like
-    AudioUnitGetProprty (called below) and AudioComponentInstanceDispose (called in ma_device_uninit)
+    AudioUnitGetProperty (called below) and AudioComponentInstanceDispose (called in ma_device_uninit)
     can try waiting on the same lock. I'm going to try working around this by not calling any Core
     Audio APIs in the callback when the device has been stopped or uninitialized.
     */
@@ -34214,12 +34228,21 @@ static ma_result ma_device_uninit__coreaudio(ma_device* pDevice)
     }
 #endif
 
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+    if (pDevice->coreaudio.audioUnitCapture != NULL) {
+        ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.CloseComponent)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
+    }
+    if (pDevice->coreaudio.audioUnitPlayback != NULL) {
+        ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.CloseComponent)((AudioUnit)pDevice->coreaudio.audioUnitPlayback);
+    }
+#else
     if (pDevice->coreaudio.audioUnitCapture != NULL) {
         ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.AudioComponentInstanceDispose)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
     }
     if (pDevice->coreaudio.audioUnitPlayback != NULL) {
         ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.AudioComponentInstanceDispose)((AudioUnit)pDevice->coreaudio.audioUnitPlayback);
     }
+#endif
 
     if (pDevice->coreaudio.pAudioBufferList) {
         ma_free(pDevice->coreaudio.pAudioBufferList, &pDevice->pContext->allocationCallbacks);
@@ -34248,7 +34271,11 @@ typedef struct
 #if defined(MA_APPLE_DESKTOP)
     AudioObjectID deviceObjectID;
 #endif
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+    Component component;
+#else
     AudioComponent component;
+#endif
     AudioUnit audioUnit;
     AudioBufferList* pAudioBufferList;  /* Only used for input devices. */
     ma_format formatOut;
@@ -34307,7 +34334,11 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
 
 
     /* Audio unit. */
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+    status = ((ma_AudioComponentInstanceNew_proc)pContext->coreaudio.OpenAComponent)((Component)pContext->coreaudio.component, (AudioUnit*)&pData->audioUnit);
+#else
     status = ((ma_AudioComponentInstanceNew_proc)pContext->coreaudio.AudioComponentInstanceNew)((AudioComponent)pContext->coreaudio.component, (AudioUnit*)&pData->audioUnit);
+#endif
     if (status != noErr) {
         return ma_result_from_OSStatus(status);
     }
@@ -34321,14 +34352,22 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
 
     status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, MA_COREAUDIO_OUTPUT_BUS, &enableIOFlag, sizeof(enableIOFlag));
     if (status != noErr) {
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+#else
         ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+#endif
         return ma_result_from_OSStatus(status);
     }
 
     enableIOFlag = (enableIOFlag == 0) ? 1 : 0;
     status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, MA_COREAUDIO_INPUT_BUS, &enableIOFlag, sizeof(enableIOFlag));
     if (status != noErr) {
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+#else
         ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+#endif
         return ma_result_from_OSStatus(status);
     }
 
@@ -34337,7 +34376,11 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
 #if defined(MA_APPLE_DESKTOP)
     status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &deviceObjectID, sizeof(deviceObjectID));
     if (status != noErr) {
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+#else
         ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+#endif
         return ma_result_from_OSStatus(result);
     }
 #else
@@ -34388,14 +34431,22 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
             status = ((ma_AudioUnitGetProperty_proc)pContext->coreaudio.AudioUnitGetProperty)(pData->audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, MA_COREAUDIO_INPUT_BUS, &origFormat, &origFormatSize);
         }
         if (status != noErr) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return ma_result_from_OSStatus(status);
         }
 
     #if defined(MA_APPLE_DESKTOP)
         result = ma_find_best_format__coreaudio(pContext, deviceObjectID, deviceType, pData->formatIn, pData->channelsIn, pData->sampleRateIn, &origFormat, &bestFormat);
         if (result != MA_SUCCESS) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return result;
         }
 
@@ -34480,19 +34531,31 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
 
         status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioUnitProperty_StreamFormat, formatScope, formatElement, &bestFormat, sizeof(bestFormat));
         if (status != noErr) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return ma_result_from_OSStatus(status);
         }
     #endif
 
         result = ma_format_from_AudioStreamBasicDescription(&bestFormat, &pData->formatOut);
         if (result != MA_SUCCESS) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return result;
         }
 
         if (pData->formatOut == ma_format_unknown) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return MA_FORMAT_NOT_SUPPORTED;
         }
 
@@ -34578,7 +34641,11 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
     */
     status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &actualPeriodSizeInFrames, sizeof(actualPeriodSizeInFrames));
     if (status != noErr) {
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+#else
         ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+#endif
         return ma_result_from_OSStatus(status);
     }
 
@@ -34591,7 +34658,11 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
 
         pBufferList = ma_allocate_AudioBufferList__coreaudio(pData->periodSizeInFramesOut, pData->formatOut, pData->channelsOut, (isInterleaved) ? ma_stream_layout_interleaved : ma_stream_layout_deinterleaved, &pContext->allocationCallbacks);
         if (pBufferList == NULL) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return MA_OUT_OF_MEMORY;
         }
 
@@ -34604,14 +34675,22 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
         callbackInfo.inputProc = ma_on_output__coreaudio;
         status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Global, 0, &callbackInfo, sizeof(callbackInfo));
         if (status != noErr) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return ma_result_from_OSStatus(status);
         }
     } else {
         callbackInfo.inputProc = ma_on_input__coreaudio;
         status = ((ma_AudioUnitSetProperty_proc)pContext->coreaudio.AudioUnitSetProperty)(pData->audioUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &callbackInfo, sizeof(callbackInfo));
         if (status != noErr) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return ma_result_from_OSStatus(status);
         }
     }
@@ -34620,7 +34699,11 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
     if (pData->registerStopEvent) {
         status = ((ma_AudioUnitAddPropertyListener_proc)pContext->coreaudio.AudioUnitAddPropertyListener)(pData->audioUnit, kAudioOutputUnitProperty_IsRunning, on_start_stop__coreaudio, pDevice_DoNotReference);
         if (status != noErr) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
             ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
             return ma_result_from_OSStatus(status);
         }
     }
@@ -34630,7 +34713,11 @@ static ma_result ma_device_init_internal__coreaudio(ma_context* pContext, ma_dev
     if (status != noErr) {
         ma_free(pData->pAudioBufferList, &pContext->allocationCallbacks);
         pData->pAudioBufferList = NULL;
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.CloseComponent)(pData->audioUnit);
+    #else
         ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);
+    #endif
         return ma_result_from_OSStatus(status);
     }
 
@@ -34672,7 +34759,11 @@ static ma_result ma_device_reinit_internal__coreaudio(ma_device* pDevice, ma_dev
 
         if (disposePreviousAudioUnit) {
             ((ma_AudioOutputUnitStop_proc)pDevice->pContext->coreaudio.AudioOutputUnitStop)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
+        #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.CloseComponent)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
+        #else
             ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.AudioComponentInstanceDispose)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
+        #endif
         }
         if (pDevice->coreaudio.pAudioBufferList) {
             ma_free(pDevice->coreaudio.pAudioBufferList, &pDevice->pContext->allocationCallbacks);
@@ -34688,7 +34779,11 @@ static ma_result ma_device_reinit_internal__coreaudio(ma_device* pDevice, ma_dev
 
         if (disposePreviousAudioUnit) {
             ((ma_AudioOutputUnitStop_proc)pDevice->pContext->coreaudio.AudioOutputUnitStop)((AudioUnit)pDevice->coreaudio.audioUnitPlayback);
+        #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+            ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.CloseComponent)((AudioUnit)pDevice->coreaudio.audioUnitPlayback);
+        #else
             ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.AudioComponentInstanceDispose)((AudioUnit)pDevice->coreaudio.audioUnitPlayback);
+        #endif
         }
     }
     data.periodSizeInFramesIn       = pDevice->coreaudio.originalPeriodSizeInFrames;
@@ -34839,7 +34934,11 @@ static ma_result ma_device_init__coreaudio(ma_device* pDevice, const ma_device_c
         result = ma_device_init_internal__coreaudio(pDevice->pContext, ma_device_type_playback, pDescriptorPlayback->pDeviceID, &data, (void*)pDevice);
         if (result != MA_SUCCESS) {
             if (pConfig->deviceType == ma_device_type_duplex) {
+    #if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+                ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.CloseComponent)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
+    #else
                 ((ma_AudioComponentInstanceDispose_proc)pDevice->pContext->coreaudio.AudioComponentInstanceDispose)((AudioUnit)pDevice->coreaudio.audioUnitCapture);
+    #endif
                 if (pDevice->coreaudio.pAudioBufferList) {
                     ma_free(pDevice->coreaudio.pAudioBufferList, &pDevice->pContext->allocationCallbacks);
                 }
@@ -35098,9 +35197,15 @@ static ma_result ma_context_init__coreaudio(ma_context* pContext, const ma_conte
         }
     }
 
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+    pContext->coreaudio.FindNextComponent                 = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioComponentFindNext");
+    pContext->coreaudio.CloseComponent                    = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioComponentInstanceDispose");
+    pContext->coreaudio.OpenAComponent                    = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioComponentInstanceNew");
+#else
     pContext->coreaudio.AudioComponentFindNext            = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioComponentFindNext");
     pContext->coreaudio.AudioComponentInstanceDispose     = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioComponentInstanceDispose");
     pContext->coreaudio.AudioComponentInstanceNew         = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioComponentInstanceNew");
+#endif
     pContext->coreaudio.AudioOutputUnitStart              = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioOutputUnitStart");
     pContext->coreaudio.AudioOutputUnitStop               = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioOutputUnitStop");
     pContext->coreaudio.AudioUnitAddPropertyListener      = ma_dlsym(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit, "AudioUnitAddPropertyListener");
@@ -35121,9 +35226,15 @@ static ma_result ma_context_init__coreaudio(ma_context* pContext, const ma_conte
     pContext->coreaudio.AudioObjectRemovePropertyListener = (ma_proc)AudioObjectRemovePropertyListener;
     #endif
 
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+    pContext->coreaudio.FindNextComponent                 = (ma_proc)AudioComponentFindNext;
+    pContext->coreaudio.CloseComponent                    = (ma_proc)AudioComponentInstanceDispose;
+    pContext->coreaudio.OpenAComponent                    = (ma_proc)AudioComponentInstanceNew;
+#else
     pContext->coreaudio.AudioComponentFindNext            = (ma_proc)AudioComponentFindNext;
     pContext->coreaudio.AudioComponentInstanceDispose     = (ma_proc)AudioComponentInstanceDispose;
     pContext->coreaudio.AudioComponentInstanceNew         = (ma_proc)AudioComponentInstanceNew;
+#endif
     pContext->coreaudio.AudioOutputUnitStart              = (ma_proc)AudioOutputUnitStart;
     pContext->coreaudio.AudioOutputUnitStop               = (ma_proc)AudioOutputUnitStop;
     pContext->coreaudio.AudioUnitAddPropertyListener      = (ma_proc)AudioUnitAddPropertyListener;
@@ -35136,7 +35247,11 @@ static ma_result ma_context_init__coreaudio(ma_context* pContext, const ma_conte
 
     /* Audio component. */
     {
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        ComponentDescription desc;
+#else
         AudioComponentDescription desc;
+#endif
         desc.componentType         = kAudioUnitType_Output;
     #if defined(MA_APPLE_DESKTOP)
         desc.componentSubType      = kAudioUnitSubType_HALOutput;
@@ -35147,7 +35262,11 @@ static ma_result ma_context_init__coreaudio(ma_context* pContext, const ma_conte
         desc.componentFlags        = 0;
         desc.componentFlagsMask    = 0;
 
+#if MAC_OS_X_VERSION_MIN_REQUIRED < 1060 /* Legacy fallback */
+        pContext->coreaudio.component = ((ma_AudioComponentFindNext_proc)pContext->coreaudio.FindNextComponent)(NULL, &desc);
+#else
         pContext->coreaudio.component = ((ma_AudioComponentFindNext_proc)pContext->coreaudio.AudioComponentFindNext)(NULL, &desc);
+#endif
         if (pContext->coreaudio.component == NULL) {
         #if !defined(MA_NO_RUNTIME_LINKING) && !defined(MA_APPLE_MOBILE)
             ma_dlclose(ma_context_get_log(pContext), pContext->coreaudio.hAudioUnit);
